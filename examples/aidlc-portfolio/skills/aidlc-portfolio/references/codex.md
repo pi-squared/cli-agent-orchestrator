@@ -77,6 +77,11 @@ directory at initialization, update that project's `aidlcIntent` mapping
 through `intent create` with the complete existing intent document and the
 reported native identity. Preserve other project mappings and session records.
 
+For large engine directives, redirect stdout to an excluded file and parse the
+complete JSON there. Piping a large steering payload through the terminal can
+produce Bun `EAGAIN` writes or truncated output. Failed or incomplete output
+requires native recovery before a continuation receipt can be consumed.
+
 This gives one conversational decision queue while the supervisor is running.
 The example does not install a browser decision inbox or an external
 notification service.

@@ -59,6 +59,12 @@ dated native intent directory, report its exact identity to the supervisor so
 it can update the existing mapping through `intent create`, preserving the
 registered worktree and session.
 
+Capture large engine JSON directives into files under `.aidlc-portfolio/`
+with shell output redirection, then parse and read the complete directive from
+that file. This avoids pipe backpressure and truncated steering output in the
+terminal transport. If output is incomplete or the command fails, recover
+through the engine before consuming its continuation receipt.
+
 Treat project/team memory in the worktree as temporary. Submit durable findings
 with `learning propose` against the assigned baseline; leave canonical writes,
 approval, and reconciliation to the supervisor. Before completion, inspect both
