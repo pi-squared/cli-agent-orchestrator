@@ -33,6 +33,10 @@ assigned child intent and objective, or resume that same intent. The AI-DLC
 engine determines stages and transitions. A newly registered portfolio child
 may have no engine workflow yet: initialize that assigned child through
 `$aidlc` when needed rather than treating absent initial state as lost work.
+For inner AI-DLC delegation, use its Codex topology bindings and configured
+native agent roles with `spawn_agent` and `send_input`. CAO dispatch belongs
+to the portfolio supervisor; a generic CAO developer profile is not a
+substitute for an AI-DLC role and can select another provider.
 Run its doctor when health is unknown;
 report missing hook trust to the supervisor and wait for the operator to trust
 the exact hooks. Leave the operator's Codex trust and permissions intact.

@@ -50,6 +50,11 @@ read `.codex/onboarding.md` before loading the project's
 `.agents/skills/aidlc/SKILL.md` and starting `$aidlc`. This retains the AI-DLC
 onboarding that the project config would otherwise supply.
 
+The portfolio supervisor uses CAO `assign` to create project runners. Inside
+each runner, AI-DLC uses its native Codex topology and agent-role configuration
+(`spawn_agent` / `send_input`). Generic CAO developer profiles do not carry
+those native roles or guarantee the same provider.
+
 The operator must trust the project and review its exact AI-DLC hooks in
 Codex's `/hooks` screen before the first unattended run. For linked worktrees,
 the listed hook source is the canonical repository's `.codex/hooks.json`.
