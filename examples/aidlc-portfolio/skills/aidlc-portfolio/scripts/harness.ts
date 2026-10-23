@@ -9,10 +9,10 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { parse } from "yaml";
 
-export type HarnessProvider = "claude";
+export type HarnessProvider = "claude" | "codex";
 
 interface HarnessManifest {
   schemaVersion: 1;
@@ -23,7 +23,7 @@ interface HarnessManifest {
     files: Record<string, string>;
   };
   overlay: {
-    opusModel: string;
+    opusModel?: string;
     revision: string;
   };
   staged: {
@@ -64,13 +64,10 @@ export interface HarnessVerification {
 const DEFAULT_OPUS_MODEL = "global.anthropic.claude-opus-5[1m]";
 const MANIFEST_FILE = "manifest.json";
 const RECEIPT_FILE = join(".aidlc-portfolio", "harness-manifest.json");
-const EXCLUDE_BLOCK = [
-  "# aidlc-portfolio runtime begin",
-  "/.claude/",
-  "/aidlc/",
-  "/.aidlc-portfolio/",
-  "# aidlc-portfolio runtime end",
-].join("\n");
+const DISTRIBUTION_PATHS: Record<HarnessProvider, string[]> = {
+  claude: [".claude", "aidlc"],
+  codex: [".codex", ".agents", "aidlc"],
+};
 
 export class HarnessError extends Error {}
 
@@ -78,7 +75,7 @@ export async function stageHarness(
   rootInput: string,
   providerInput: string,
   sourceInput: string,
-  opusModel = DEFAULT_OPUS_MODEL,
+  opusModel?: string,
 ): Promise<{
   changed: boolean;
   path: string;
@@ -86,6 +83,12 @@ export async function stageHarness(
   manifestRevision: string;
 }> {
   const provider = requireProvider(providerInput);
+  if (provider === "codex" && opusModel !== undefined) {
+    throw new HarnessError("--opus-model applies only to the Claude harness");
+  }
+  const overlay = provider === "claude"
+    ? { opusModel: opusModel ?? DEFAULT_OPUS_MODEL }
+    : {};
   const root = resolve(rootInput);
   const source = resolve(sourceInput);
   const target = harnessRoot(root, provider);
@@ -94,26 +97,29 @@ export async function stageHarness(
       "harness source and staged target must not contain one another",
     );
   }
-  await validateDistribution(source);
+  await validateDistribution(source, provider);
 
-  const sourceFiles = await distributionFiles(source);
+  const sourceFiles = await distributionFiles(source, provider);
   const sourceRevision = await sourceRevisionFor(source, sourceFiles);
-  const overlayRevision = revisionOf({ provider, opusModel });
+  const overlayRevision = revisionOf({ provider, ...overlay });
   const existing = await readManifest(target);
   const existingStagedFiles = existing
-    ? await optionalDistributionFiles(target)
+    ? await optionalDistributionFiles(target, provider)
     : null;
-  const existingOpusModel = existing ? await optionalConfiguredOpusModel(target) : null;
+  const existingOpusModel = existing && provider === "claude"
+    ? await optionalConfiguredOpusModel(target)
+    : undefined;
   if (
     existing &&
+    existing.provider === provider &&
     existing.source.path === source &&
     existing.source.revision === sourceRevision &&
     mapsEqual(existing.source.files, sourceFiles) &&
-    existing.overlay.opusModel === opusModel &&
+    existing.overlay.opusModel === overlay.opusModel &&
     existing.overlay.revision === overlayRevision &&
     existingStagedFiles &&
     mapsEqual(existing.staged.files, existingStagedFiles) &&
-    existingOpusModel === opusModel
+    existingOpusModel === overlay.opusModel
   ) {
     return {
       changed: false,
@@ -124,18 +130,18 @@ export async function stageHarness(
   }
 
   const parent = dirname(target);
-  const temporary = join(parent, `.claude-stage-${crypto.randomUUID()}`);
+  const temporary = join(parent, `.${provider}-stage-${crypto.randomUUID()}`);
   await mkdir(parent, { recursive: true });
   try {
-    await cp(join(source, ".claude"), join(temporary, ".claude"), {
-      recursive: true,
-      errorOnExist: true,
-    });
-    await cp(join(source, "aidlc"), join(temporary, "aidlc"), {
-      recursive: true,
-      errorOnExist: true,
-    });
-    await applyClaudeOverlay(temporary, opusModel);
+    for (const name of DISTRIBUTION_PATHS[provider]) {
+      await cp(join(source, name), join(temporary, name), {
+        recursive: true,
+        errorOnExist: true,
+      });
+    }
+    if (overlay.opusModel !== undefined) {
+      await applyClaudeOverlay(temporary, overlay.opusModel);
+    }
     const manifest: HarnessManifest = {
       schemaVersion: 1,
       provider,
@@ -145,11 +151,11 @@ export async function stageHarness(
         files: sourceFiles,
       },
       overlay: {
-        opusModel,
+        ...overlay,
         revision: overlayRevision,
       },
       staged: {
-        files: await distributionFiles(temporary),
+        files: await distributionFiles(temporary, provider),
       },
       stagedAt: new Date().toISOString(),
     };
@@ -175,11 +181,12 @@ export async function syncHarness(
   changed: boolean;
   manifestRevision: string;
   worktrees: Array<RegisteredWorktree & { changed: boolean }>;
+  canonicalHooks: Array<{ path: string; changed: boolean }>;
 }> {
   const provider = requireProvider(providerInput);
   const root = resolve(rootInput);
   const staged = harnessRoot(root, provider);
-  const manifest = await requireCleanStagedHarness(staged);
+  const manifest = await requireCleanStagedHarness(staged, provider);
   const manifestRevision = revisionOf(manifest);
   const worktrees = await registeredWorktrees(root, project, intent);
   if (worktrees.length === 0) {
@@ -193,10 +200,20 @@ export async function syncHarness(
       changed: await syncWorktree(worktree.path, staged, manifest, manifestRevision),
     });
   }
+  const canonicalHooks = [];
+  if (provider === "codex") {
+    for (const repository of await canonicalRepositories(root, worktrees)) {
+      canonicalHooks.push({
+        path: join(repository, ".codex/hooks.json"),
+        changed: await syncCanonicalHooks(repository, staged),
+      });
+    }
+  }
   return {
-    changed: results.some((item) => item.changed),
+    changed: canonicalHooks.some((item) => item.changed) || results.some((item) => item.changed),
     manifestRevision,
     worktrees: results,
+    canonicalHooks,
   };
 }
 
@@ -214,8 +231,8 @@ export async function verifyHarness(
   let manifest: HarnessManifest | null = null;
 
   try {
-    manifest = await requireCleanStagedHarness(staged);
-    const sourceFiles = await distributionFiles(manifest.source.path);
+    manifest = await requireCleanStagedHarness(staged, provider);
+    const sourceFiles = await distributionFiles(manifest.source.path, provider);
     const sourceRevision = await sourceRevisionFor(manifest.source.path, sourceFiles);
     if (
       sourceRevision !== manifest.source.revision ||
@@ -246,6 +263,20 @@ export async function verifyHarness(
         errors: worktreeErrors,
       });
     }
+    if (provider === "codex") {
+      try {
+        for (const repository of await canonicalRepositories(root, worktrees)) {
+          const path = ".codex/hooks.json";
+          await requireRegularAncestors(repository, path);
+          const hash = createHash("sha256").update(await readFile(join(repository, path))).digest("hex");
+          if (hash !== manifest.staged.files[path]) {
+            errors.push(`canonical Codex hook manifest differs from staged runtime: ${repository}`);
+          }
+        }
+      } catch (error) {
+        errors.push(`canonical Codex hooks: ${errorMessage(error)}`);
+      }
+    }
   }
 
   return {
@@ -258,6 +289,46 @@ export async function verifyHarness(
   };
 }
 
+async function canonicalRepositories(root: string, worktrees: RegisteredWorktree[]): Promise<string[]> {
+  const repositories = new Set<string>();
+  for (const { path } of worktrees) {
+    const common = resolve(path, (await gitOutput(path, ["rev-parse", "--git-common-dir"])).trim());
+    if (common === join(path, ".git")) continue;
+    if (basename(common) !== ".git") {
+      throw new HarnessError(`unsupported canonical Git directory: ${common}`);
+    }
+    repositories.add(resolveInside(root, dirname(common), join(root, "repositories")));
+  }
+  return [...repositories].sort();
+}
+
+async function syncCanonicalHooks(repository: string, staged: string): Promise<boolean> {
+  // Codex 0.164 discovers linked-worktree hooks in the primary checkout.
+  // Hook commands still execute with the child's cwd and projected runtime.
+  const path = ".codex/hooks.json";
+  await requireRegularAncestors(repository, path);
+  const source = await readFile(join(staged, path));
+  const tracked = (await gitOutput(repository, ["ls-files", "--", path])).trim();
+  if (tracked) {
+    throw new HarnessError(`refusing to overwrite tracked canonical Codex hooks: ${repository}/${path}`);
+  }
+  try {
+    if (source.equals(await readFile(join(repository, path)))) return false;
+  } catch (error) {
+    if (!isMissingPathError(error)) throw error;
+  }
+  const target = join(repository, path);
+  await mkdir(dirname(target), { recursive: true });
+  const temporary = `${target}.${crypto.randomUUID()}.tmp`;
+  try {
+    await writeFile(temporary, source, { flag: "wx" });
+    await rename(temporary, target);
+  } finally {
+    await rm(temporary, { force: true });
+  }
+  return true;
+}
+
 async function syncWorktree(
   worktree: string,
   staged: string,
@@ -268,8 +339,7 @@ async function syncWorktree(
   const tracked = await gitOutput(worktree, [
     "ls-files",
     "--",
-    ".claude",
-    "aidlc",
+    ...DISTRIBUTION_PATHS[manifest.provider],
     ".aidlc-portfolio",
   ]);
   if (tracked.trim()) {
@@ -282,21 +352,24 @@ async function syncWorktree(
   }
 
   const verification = await verifyWorktree(worktree, manifest, manifestRevision);
-  if (verification.length === 0 && (await hasExcludeBlock(worktree))) {
+  if (verification.length === 0 && (await hasExcludeBlock(worktree, manifest.provider))) {
     return false;
   }
 
   const temporary = join(worktree, `.aidlc-portfolio-sync-${crypto.randomUUID()}`);
   try {
-    await cp(join(staged, ".claude"), join(temporary, ".claude"), {
-      recursive: true,
-      errorOnExist: true,
-    });
-    await cp(join(staged, "aidlc"), join(temporary, "aidlc"), {
-      recursive: true,
-      errorOnExist: true,
-    });
-    await replaceWorktreeDistribution(temporary, worktree);
+    for (const name of DISTRIBUTION_PATHS[manifest.provider]) {
+      await cp(join(staged, name), join(temporary, name), {
+        recursive: true,
+        errorOnExist: true,
+      });
+    }
+    await preserveWorkspace(staged, temporary, worktree, manifest);
+    const prepared = await distributionFiles(temporary, manifest.provider, manifest.staged.files);
+    if (!mapsEqual(prepared, immutableFiles(manifest.staged.files))) {
+      throw new HarnessError("prepared runtime differs from the staged manifest");
+    }
+    await replaceWorktreeDistribution(temporary, worktree, manifest.provider);
     const receipt: HarnessReceipt = {
       schemaVersion: 1,
       provider: manifest.provider,
@@ -305,7 +378,7 @@ async function syncWorktree(
       syncedAt: new Date().toISOString(),
     };
     await writeJson(join(worktree, RECEIPT_FILE), receipt);
-    await ensureExcludeBlock(worktree);
+    await ensureExcludeBlock(worktree, manifest.provider);
     return true;
   } finally {
     await rm(temporary, { recursive: true, force: true });
@@ -320,21 +393,26 @@ async function verifyWorktree(
   const errors: string[] = [];
   try {
     await requireGitWorktree(worktree);
-    const files = await distributionFiles(worktree);
-    if (!mapsEqual(files, manifest.staged.files)) {
+    const files = await distributionFiles(worktree, manifest.provider, manifest.staged.files);
+    const expected = immutableFiles(manifest.staged.files);
+    if (!mapsEqual(files, expected)) {
       errors.push("projected harness files differ from the staged manifest");
     }
-    if ((await configuredOpusModel(worktree)) !== manifest.overlay.opusModel) {
+    if (manifest.provider === "claude" &&
+        (await configuredOpusModel(worktree)) !== manifest.overlay.opusModel) {
       errors.push(`Claude model overlay differs from ${manifest.overlay.opusModel}`);
     }
     const receipt = await readJson<HarnessReceipt>(join(worktree, RECEIPT_FILE));
+    if (receipt.provider !== manifest.provider) {
+      errors.push("worktree receipt references a different harness provider");
+    }
     if (receipt.manifestRevision !== manifestRevision) {
       errors.push("worktree receipt references a different harness manifest");
     }
     if (!mapsEqual(receipt.files, manifest.staged.files)) {
       errors.push("worktree receipt file hashes differ from the staged manifest");
     }
-    if (!(await hasExcludeBlock(worktree))) {
+    if (!(await hasExcludeBlock(worktree, manifest.provider))) {
       errors.push("repository-local harness exclusions are missing");
     }
   } catch (error) {
@@ -343,16 +421,23 @@ async function verifyWorktree(
   return errors;
 }
 
-async function requireCleanStagedHarness(staged: string): Promise<HarnessManifest> {
+async function requireCleanStagedHarness(
+  staged: string,
+  provider: HarnessProvider,
+): Promise<HarnessManifest> {
   const manifest = await readManifest(staged);
   if (!manifest) {
     throw new HarnessError(`staged harness manifest not found: ${staged}`);
   }
-  const files = await distributionFiles(staged);
+  if (manifest.provider !== provider) {
+    throw new HarnessError(`staged harness provider is not ${provider}`);
+  }
+  const files = await distributionFiles(staged, provider);
   if (!mapsEqual(files, manifest.staged.files)) {
     throw new HarnessError(`staged harness files do not match ${join(staged, MANIFEST_FILE)}`);
   }
-  if ((await configuredOpusModel(staged)) !== manifest.overlay.opusModel) {
+  if (provider === "claude" &&
+      (await configuredOpusModel(staged)) !== manifest.overlay.opusModel) {
     throw new HarnessError(
       `staged Claude model does not match overlay ${manifest.overlay.opusModel}`,
     );
@@ -399,26 +484,117 @@ async function registeredWorktrees(
   return worktrees;
 }
 
-async function validateDistribution(root: string): Promise<void> {
-  for (const required of [
-    join(".claude", "settings.json"),
-    join(".claude", "skills", "aidlc", "SKILL.md"),
-    "aidlc",
-  ]) {
+async function validateDistribution(root: string, provider: HarnessProvider): Promise<void> {
+  const requiredFiles = provider === "claude"
+    ? [".claude/settings.json", ".claude/skills/aidlc/SKILL.md"]
+    : [".codex/config.toml", ".codex/hooks.json", ".agents/skills/aidlc/SKILL.md"];
+  for (const required of [...DISTRIBUTION_PATHS[provider], ...requiredFiles]) {
     try {
-      await lstat(join(root, required));
+      const entry = await lstat(join(root, required));
+      if (entry.isSymbolicLink() ||
+          (DISTRIBUTION_PATHS[provider].includes(required) ? !entry.isDirectory() : !entry.isFile())) {
+        throw new HarnessError(`invalid runtime entry: ${required}`);
+      }
     } catch {
-      throw new HarnessError(`Claude distribution is missing ${required}: ${root}`);
+      throw new HarnessError(`${provider} distribution is missing a regular ${required}: ${root}`);
     }
   }
 }
 
-async function distributionFiles(root: string): Promise<Record<string, string>> {
-  await validateDistribution(root);
+async function distributionFiles(
+  root: string,
+  provider: HarnessProvider,
+  seeds?: Record<string, string>,
+): Promise<Record<string, string>> {
+  await validateDistribution(root, provider);
   const files: Record<string, string> = {};
-  await collectFiles(root, ".claude", files);
-  await collectFiles(root, "aidlc", files);
+  for (const name of DISTRIBUTION_PATHS[provider]) {
+    if (name === "aidlc" && seeds) {
+      // The workspace shell grows intents, audit logs and memory during a run.
+      // Verify its immutable seed files without treating child state as drift.
+      for (const path of Object.keys(seeds).filter((path) => path.startsWith("aidlc/")).sort()) {
+        if (mutableWorkspacePath(path)) continue;
+        await requireRegularAncestors(root, path);
+        files[path] = createHash("sha256").update(await readFile(join(root, path))).digest("hex");
+      }
+    } else {
+      await collectFiles(root, name, files);
+    }
+  }
   return files;
+}
+
+function mutableWorkspacePath(path: string): boolean {
+  return path === "aidlc/active-space" ||
+    /^aidlc\/spaces\/[^/]+\/memory\/(project|team)\.md$/.test(path);
+}
+
+function immutableFiles(files: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(Object.entries(files).filter(([path]) => !mutableWorkspacePath(path)));
+}
+
+async function preserveWorkspace(
+  staged: string,
+  temporary: string,
+  worktree: string,
+  manifest: HarnessManifest,
+): Promise<void> {
+  const workspace = join(worktree, "aidlc");
+  try {
+    const entry = await lstat(workspace);
+    if (!entry.isDirectory() || entry.isSymbolicLink()) {
+      throw new HarnessError(`workspace shell is not a regular directory: ${workspace}`);
+    }
+  } catch (error) {
+    if (isMissingPathError(error)) return;
+    throw error;
+  }
+  await rm(join(temporary, "aidlc"), { recursive: true });
+  await cp(workspace, join(temporary, "aidlc"), { recursive: true });
+
+  let previous: HarnessReceipt | null = null;
+  try {
+    previous = await readJson<HarnessReceipt>(join(worktree, RECEIPT_FILE));
+  } catch {
+    // First projection can encounter a pre-existing, untracked workspace shell.
+  }
+  for (const path of Object.keys(previous?.files ?? {})) {
+    if (!path.startsWith("aidlc/") || mutableWorkspacePath(path) || path in manifest.staged.files) continue;
+    await requireRegularAncestors(temporary, path);
+    await rm(resolveInside(temporary, path, join(temporary, "aidlc")), { force: true });
+  }
+  for (const path of Object.keys(manifest.staged.files).filter((path) => path.startsWith("aidlc/"))) {
+    await requireRegularAncestors(temporary, path);
+    const destination = resolveInside(temporary, path, join(temporary, "aidlc"));
+    if (mutableWorkspacePath(path)) {
+      try {
+        await lstat(destination);
+        continue;
+      } catch (error) {
+        if (!isMissingPathError(error)) throw error;
+        // Missing project/team memory can be intentional after memory clean.
+        if (path !== "aidlc/active-space") continue;
+      }
+    }
+    await mkdir(dirname(destination), { recursive: true });
+    await cp(join(staged, path), destination);
+  }
+}
+
+async function requireRegularAncestors(root: string, path: string): Promise<void> {
+  resolveInside(root, path, root);
+  const parts = path.split("/");
+  for (let end = 1; end <= parts.length; end++) {
+    const current = join(root, ...parts.slice(0, end));
+    try {
+      if ((await lstat(current)).isSymbolicLink()) {
+        throw new HarnessError(`refusing to follow workspace symbolic link: ${current}`);
+      }
+    } catch (error) {
+      if (isMissingPathError(error)) return;
+      throw error;
+    }
+  }
 }
 
 async function collectFiles(
@@ -468,9 +644,10 @@ async function configuredOpusModel(root: string): Promise<string | null> {
 
 async function optionalDistributionFiles(
   root: string,
+  provider: HarnessProvider,
 ): Promise<Record<string, string> | null> {
   try {
-    return await distributionFiles(root);
+    return await distributionFiles(root, provider);
   } catch {
     return null;
   }
@@ -511,8 +688,17 @@ async function requireGitWorktree(worktree: string): Promise<void> {
   }
 }
 
-async function ensureExcludeBlock(worktree: string): Promise<void> {
-  if (await hasExcludeBlock(worktree)) return;
+function excludeBlock(provider: HarnessProvider): string {
+  return [
+    "# aidlc-portfolio runtime begin",
+    ...DISTRIBUTION_PATHS[provider].map((name) => `/${name}/`),
+    "/.aidlc-portfolio/",
+    "# aidlc-portfolio runtime end",
+  ].join("\n");
+}
+
+async function ensureExcludeBlock(worktree: string, provider: HarnessProvider): Promise<void> {
+  if (await hasExcludeBlock(worktree, provider)) return;
   const exclude = await excludePath(worktree);
   let content = "";
   try {
@@ -520,14 +706,14 @@ async function ensureExcludeBlock(worktree: string): Promise<void> {
   } catch {
     // Git may not have created the repository-local exclude file yet.
   }
-  const next = `${content.replace(/\s+$/, "")}${content.trim() ? "\n\n" : ""}${EXCLUDE_BLOCK}\n`;
+  const next = `${content.replace(/\s+$/, "")}${content.trim() ? "\n\n" : ""}${excludeBlock(provider)}\n`;
   await mkdir(dirname(exclude), { recursive: true });
   await writeFile(exclude, next);
 }
 
-async function hasExcludeBlock(worktree: string): Promise<boolean> {
+async function hasExcludeBlock(worktree: string, provider: HarnessProvider): Promise<boolean> {
   try {
-    return (await readFile(await excludePath(worktree), "utf8")).includes(EXCLUDE_BLOCK);
+    return (await readFile(await excludePath(worktree), "utf8")).includes(excludeBlock(provider));
   } catch {
     return false;
   }
@@ -562,9 +748,10 @@ async function replaceDirectory(source: string, target: string): Promise<void> {
 async function replaceWorktreeDistribution(
   temporary: string,
   worktree: string,
+  provider: HarnessProvider,
 ): Promise<void> {
   const backup = join(worktree, `.aidlc-portfolio-backup-${crypto.randomUUID()}`);
-  const names = [".claude", "aidlc"];
+  const names = DISTRIBUTION_PATHS[provider];
   const backedUp: string[] = [];
   const installed: string[] = [];
   await mkdir(backup);
@@ -639,8 +826,8 @@ function harnessRoot(root: string, provider: HarnessProvider): string {
   return join(root, "harness", provider);
 }
 
-function requireProvider(value: string): HarnessProvider {
-  if (value !== "claude") {
+export function requireProvider(value: string): HarnessProvider {
+  if (value !== "claude" && value !== "codex") {
     throw new HarnessError(`unsupported harness provider: ${value}`);
   }
   return value;
@@ -687,7 +874,9 @@ function mapsEqual(
   left: Record<string, string>,
   right: Record<string, string>,
 ): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
+  const keys = Object.keys(left);
+  return keys.length === Object.keys(right).length &&
+    keys.every((key) => left[key] === right[key]);
 }
 
 function toPortablePath(value: string): string {

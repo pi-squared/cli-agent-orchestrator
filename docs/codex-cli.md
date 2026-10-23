@@ -103,6 +103,12 @@ When you launch with an agent profile (e.g., `--agents code_supervisor`), CAO:
 
 This enables Codex to operate with role-specific instructions (e.g., supervisor, developer, reviewer) just like other providers.
 
+For a multi-project workflow with isolated worktrees and persistent human
+question packets, see the
+[AI-DLC portfolio Codex setup](../examples/aidlc-portfolio/README.md#codex-setup).
+Its runner explicitly reads the AI-DLC onboarding because CAO's role prompt
+replaces the project's `developer_instructions` value.
+
 ### MCP Server Integration
 
 If the agent profile includes `mcpServers`, CAO injects each MCP server into Codex via `-c mcp_servers.<name>.<field>=<value>` config overrides. This is per-session and does not modify the user's global `~/.codex/config.toml`.

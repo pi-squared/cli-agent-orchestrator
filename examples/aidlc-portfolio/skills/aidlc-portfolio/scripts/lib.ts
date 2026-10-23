@@ -13,7 +13,7 @@ import {
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { parse, stringify } from "yaml";
 import { checkConvergence } from "./convergence.ts";
-import { verifyHarness } from "./harness.ts";
+import { type HarnessProvider, requireProvider, verifyHarness } from "./harness.ts";
 
 export type DocumentKind = "project" | "dependency" | "intent";
 export type MemoryDestination = "project" | "team";
@@ -49,6 +49,7 @@ interface PortfolioDocument {
   schemaVersion: 1;
   id: string;
   name: string;
+  harnessProvider?: HarnessProvider;
   status: "draft" | "active" | "archived";
   organization: { name: string; domains: string[] };
   businessCapabilities: string[];
@@ -223,6 +224,7 @@ export interface MemorySnapshot {
 }
 
 interface DispatchReadiness {
+  harnessProvider: HarnessProvider;
   worktree: string;
   branch: string;
   aidlcIntent: string;
@@ -337,7 +339,9 @@ export async function initializeWorkspace(
   rootInput: string,
   id: string,
   name: string,
+  providerInput = "claude",
 ): Promise<{ created: boolean; root: string }> {
+  const provider = requireProvider(providerInput);
   assertId(id, "portfolio id");
   if (!name.trim()) {
     throw new PortfolioError("portfolio name must not be empty");
@@ -354,6 +358,11 @@ export async function initializeWorkspace(
           `workspace already belongs to portfolio ${existing.id} (${existing.name})`,
         );
       }
+      if ((existing.harnessProvider ?? "claude") !== provider) {
+        throw new PortfolioError(
+          `workspace already uses the ${existing.harnessProvider ?? "claude"} harness`,
+        );
+      }
       await ensureDirectories(paths.root);
       const validation = await validateWorkspace(paths.root);
       if (!validation.ok) {
@@ -368,6 +377,7 @@ export async function initializeWorkspace(
       schemaVersion: 1,
       id,
       name,
+      harnessProvider: provider,
       status: "draft",
       organization: { name: "Unknown", domains: [] },
       businessCapabilities: [],
@@ -410,6 +420,11 @@ export async function initializeWorkspace(
     }
     return { created: true, root: paths.root };
   });
+}
+
+export async function portfolioHarnessProvider(rootInput: string): Promise<HarnessProvider> {
+  const portfolio = await readYaml<PortfolioDocument>(workspacePaths(rootInput).portfolioFile);
+  return requireProvider(portfolio.harnessProvider ?? "claude");
 }
 
 export async function registerDocument(
@@ -1113,7 +1128,8 @@ async function assertDispatchable(
   if (!(await pathExists(worktree))) {
     throw new PortfolioError(`worktree does not exist: ${worktree}`);
   }
-  const harness = await verifyHarness(root, "claude", projectId, intentId);
+  const harnessProvider = loaded.portfolio.harnessProvider ?? "claude";
+  const harness = await verifyHarness(root, harnessProvider, projectId, intentId);
   if (!harness.ok) {
     const details = [
       ...harness.errors,
@@ -1151,6 +1167,7 @@ async function assertDispatchable(
   }
   return {
     worktree,
+    harnessProvider,
     branch: mapping.branch,
     aidlcIntent: mapping.aidlcIntent,
     aidlcSpace,
@@ -1769,6 +1786,7 @@ async function ensureDirectories(root: string): Promise<void> {
 
 async function hasAidlcHarness(worktree: string): Promise<boolean> {
   const candidates = [
+    ".agents/skills/aidlc/SKILL.md",
     ".claude/skills/aidlc/SKILL.md",
     ".kiro/skills/aidlc/SKILL.md",
     ".codex/skills/aidlc/SKILL.md",
@@ -1980,7 +1998,7 @@ async function transitionBlockers(
     if (!actor?.trim()) {
       blockers.push("record explicit plan acceptance with --accepted-by <human>");
     }
-    const harness = await verifyHarness(root, "claude");
+    const harness = await verifyHarness(root, loaded.portfolio.harnessProvider ?? "claude");
     if (!harness.ok) {
       blockers.push(
         ...harness.errors.map((error) => `harness: ${error}`),

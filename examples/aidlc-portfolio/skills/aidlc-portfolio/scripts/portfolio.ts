@@ -29,6 +29,7 @@ import {
   type LearningStatus,
   type MemoryDestination,
   type QuestionAnswerMode,
+  portfolioHarnessProvider,
   validateWorkspace,
   type SessionStatus,
 } from "./lib.ts";
@@ -68,6 +69,7 @@ async function main(argv: string[]): Promise<void> {
         root,
         required(options, "id"),
         required(options, "name"),
+        String(options.provider ?? "claude"),
       );
       printJson({ ok: true, ...result });
       return;
@@ -138,12 +140,9 @@ async function main(argv: string[]): Promise<void> {
         ok: true,
         ...(await stageHarness(
           root,
-          String(options.provider ?? "claude"),
+          String(options.provider ?? await portfolioHarnessProvider(root)),
           required(options, "source"),
-          String(
-            options["opus-model"] ??
-              "global.anthropic.claude-opus-5[1m]",
-          ),
+          optional(options, "opus-model"),
         )),
       });
       return;
@@ -152,7 +151,7 @@ async function main(argv: string[]): Promise<void> {
         ok: true,
         ...(await syncHarness(
           root,
-          String(options.provider ?? "claude"),
+          String(options.provider ?? await portfolioHarnessProvider(root)),
           optional(options, "project"),
           optional(options, "intent"),
         )),
@@ -161,7 +160,7 @@ async function main(argv: string[]): Promise<void> {
     case "harness verify": {
       const result = await verifyHarness(
         root,
-        String(options.provider ?? "claude"),
+        String(options.provider ?? await portfolioHarnessProvider(root)),
         optional(options, "project"),
         optional(options, "intent"),
       );
@@ -434,7 +433,7 @@ function printHelp(): void {
   console.log(`AI-DLC Portfolio
 
 Usage:
-  portfolio.ts init --root PATH --id ID --name NAME
+  portfolio.ts init --root PATH --id ID --name NAME [--provider claude|codex]
   portfolio.ts doctor --root PATH
   portfolio.ts validate --root PATH
   portfolio.ts status --root PATH
@@ -445,9 +444,9 @@ Usage:
   portfolio.ts lifecycle status --root PATH
   portfolio.ts lifecycle advance --root PATH --to PHASE [--accepted-by HUMAN] [--actor NAME]
   portfolio.ts lifecycle complete --root PATH [--actor NAME]
-  portfolio.ts harness stage --root PATH --source PATH [--provider claude] [--opus-model MODEL]
-  portfolio.ts harness sync --root PATH [--provider claude] [--project ID] [--intent ID]
-  portfolio.ts harness verify --root PATH [--provider claude] [--project ID] [--intent ID]
+  portfolio.ts harness stage --root PATH --source PATH [--provider claude|codex] [--opus-model MODEL]
+  portfolio.ts harness sync --root PATH [--provider claude|codex] [--project ID] [--intent ID]
+  portfolio.ts harness verify --root PATH [--provider claude|codex] [--project ID] [--intent ID]
   portfolio.ts project register --root PATH --file FILE
   portfolio.ts discovery confirm --root PATH --file FILE
   portfolio.ts dependency add --root PATH --file FILE
