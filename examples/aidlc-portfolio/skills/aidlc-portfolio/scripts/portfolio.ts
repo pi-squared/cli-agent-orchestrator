@@ -29,6 +29,7 @@ import {
   type LearningStatus,
   type MemoryDestination,
   type QuestionAnswerMode,
+  portfolioHarnessProvider,
   validateWorkspace,
   type SessionStatus,
 } from "./lib.ts";
@@ -42,6 +43,7 @@ import {
   decideConvergenceRisk,
   submitChildResult,
 } from "./convergence.ts";
+import { reviewCodexStartup, trustCodexStartup, verifyCodexStartup } from "./codex.ts";
 
 type Options = Record<string, string | boolean>;
 
@@ -63,11 +65,21 @@ async function main(argv: string[]): Promise<void> {
 
   const root = required(options, "root");
   switch (command) {
+    case "codex review":
+      printJson({ ok: true, ...(await reviewCodexStartup(root, required(options, "project"), required(options, "intent"))) });
+      return;
+    case "codex trust":
+      printJson({ ok: true, ...(await trustCodexStartup(root, required(options, "id"), required(options, "callback-terminal"))) });
+      return;
+    case "codex verify":
+      printJson({ ok: true, ...(await verifyCodexStartup(root, required(options, "project"), required(options, "intent"), true)) });
+      return;
     case "init": {
       const result = await initializeWorkspace(
         root,
         required(options, "id"),
         required(options, "name"),
+        String(options.provider ?? "claude"),
       );
       printJson({ ok: true, ...result });
       return;
@@ -138,12 +150,9 @@ async function main(argv: string[]): Promise<void> {
         ok: true,
         ...(await stageHarness(
           root,
-          String(options.provider ?? "claude"),
+          String(options.provider ?? await portfolioHarnessProvider(root)),
           required(options, "source"),
-          String(
-            options["opus-model"] ??
-              "global.anthropic.claude-opus-5[1m]",
-          ),
+          optional(options, "opus-model"),
         )),
       });
       return;
@@ -152,7 +161,7 @@ async function main(argv: string[]): Promise<void> {
         ok: true,
         ...(await syncHarness(
           root,
-          String(options.provider ?? "claude"),
+          String(options.provider ?? await portfolioHarnessProvider(root)),
           optional(options, "project"),
           optional(options, "intent"),
         )),
@@ -161,7 +170,7 @@ async function main(argv: string[]): Promise<void> {
     case "harness verify": {
       const result = await verifyHarness(
         root,
-        String(options.provider ?? "claude"),
+        String(options.provider ?? await portfolioHarnessProvider(root)),
         optional(options, "project"),
         optional(options, "intent"),
       );
@@ -265,7 +274,7 @@ async function main(argv: string[]): Promise<void> {
       return;
     case "question list": {
       const status = optional(options, "status");
-      if (status && status !== "pending" && status !== "answered") {
+      if (status && status !== "pending" && status !== "answered" && status !== "expired") {
         throw new PortfolioError(`invalid question status: ${status}`);
       }
       printJson({
@@ -274,7 +283,7 @@ async function main(argv: string[]): Promise<void> {
           root,
           optional(options, "project"),
           optional(options, "intent"),
-          status as "pending" | "answered" | undefined,
+          status as "pending" | "answered" | "expired" | undefined,
         ),
       });
       return;
@@ -371,6 +380,7 @@ function parseCommand(argv: string[]): { command: string; options: Options } {
     "intent",
     "learning",
     "harness",
+    "codex",
     "lifecycle",
     "result",
     "convergence",
@@ -434,7 +444,7 @@ function printHelp(): void {
   console.log(`AI-DLC Portfolio
 
 Usage:
-  portfolio.ts init --root PATH --id ID --name NAME
+  portfolio.ts init --root PATH --id ID --name NAME [--provider claude|codex]
   portfolio.ts doctor --root PATH
   portfolio.ts validate --root PATH
   portfolio.ts status --root PATH
@@ -445,9 +455,12 @@ Usage:
   portfolio.ts lifecycle status --root PATH
   portfolio.ts lifecycle advance --root PATH --to PHASE [--accepted-by HUMAN] [--actor NAME]
   portfolio.ts lifecycle complete --root PATH [--actor NAME]
-  portfolio.ts harness stage --root PATH --source PATH [--provider claude] [--opus-model MODEL]
-  portfolio.ts harness sync --root PATH [--provider claude] [--project ID] [--intent ID]
-  portfolio.ts harness verify --root PATH [--provider claude] [--project ID] [--intent ID]
+  portfolio.ts harness stage --root PATH --source PATH [--provider claude|codex] [--opus-model MODEL]
+  portfolio.ts harness sync --root PATH [--provider claude|codex] [--project ID] [--intent ID]
+  portfolio.ts harness verify --root PATH [--provider claude|codex] [--project ID] [--intent ID]
+  portfolio.ts codex review --root PATH --project ID --intent ID
+  portfolio.ts codex trust --root PATH --id ID --callback-terminal TERMINAL_ID
+  portfolio.ts codex verify --root PATH --project ID --intent ID
   portfolio.ts project register --root PATH --file FILE
   portfolio.ts discovery confirm --root PATH --file FILE
   portfolio.ts dependency add --root PATH --file FILE
@@ -459,7 +472,7 @@ Usage:
   portfolio.ts learning reject --root PATH --id ID --reason TEXT
   portfolio.ts question submit --root PATH --id ID --project ID --intent ID --stage ID --file FILE
   portfolio.ts question answer --root PATH --id ID --file FILE --mode guided|markdown|chat --answered-by NAME
-  portfolio.ts question list --root PATH [--project ID] [--intent ID] [--status pending|answered]
+  portfolio.ts question list --root PATH [--project ID] [--intent ID] [--status pending|answered|expired]
   portfolio.ts memory inspect --root PATH --project ID --intent ID [--destination project|team] [--space ID]
   portfolio.ts memory refresh --root PATH --project ID --intent ID --expected-worktree-revision HASH [--destination project|team] [--space ID]
   portfolio.ts memory clean --root PATH --project ID --intent ID --expected-worktree-revision HASH [--destination project|team] [--space ID]

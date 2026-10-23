@@ -13,7 +13,7 @@ import {
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { parse, stringify } from "yaml";
 import { checkConvergence } from "./convergence.ts";
-import { verifyHarness } from "./harness.ts";
+import { type HarnessProvider, requireProvider, verifyHarness } from "./harness.ts";
 
 export type DocumentKind = "project" | "dependency" | "intent";
 export type MemoryDestination = "project" | "team";
@@ -49,6 +49,7 @@ interface PortfolioDocument {
   schemaVersion: 1;
   id: string;
   name: string;
+  harnessProvider?: HarnessProvider;
   status: "draft" | "active" | "archived";
   organization: { name: string; domains: string[] };
   businessCapabilities: string[];
@@ -159,13 +160,15 @@ interface DiscoveryDecision {
   catalogRevision?: string;
 }
 
-interface QuestionPacket {
+export interface QuestionPacket {
   schemaVersion: 1;
   id: string;
   project: string;
   intent: string;
   stage: string;
-  status: "pending" | "answered";
+  status: "pending" | "answered" | "expired";
+  kind?: "startup" | "permission";
+  expiresAt?: string;
   questionRevision: string;
   questionCount: number;
   createdAt: string;
@@ -223,6 +226,7 @@ export interface MemorySnapshot {
 }
 
 interface DispatchReadiness {
+  harnessProvider: HarnessProvider;
   worktree: string;
   branch: string;
   aidlcIntent: string;
@@ -337,7 +341,9 @@ export async function initializeWorkspace(
   rootInput: string,
   id: string,
   name: string,
+  providerInput = "claude",
 ): Promise<{ created: boolean; root: string }> {
+  const provider = requireProvider(providerInput);
   assertId(id, "portfolio id");
   if (!name.trim()) {
     throw new PortfolioError("portfolio name must not be empty");
@@ -354,6 +360,11 @@ export async function initializeWorkspace(
           `workspace already belongs to portfolio ${existing.id} (${existing.name})`,
         );
       }
+      if ((existing.harnessProvider ?? "claude") !== provider) {
+        throw new PortfolioError(
+          `workspace already uses the ${existing.harnessProvider ?? "claude"} harness`,
+        );
+      }
       await ensureDirectories(paths.root);
       const validation = await validateWorkspace(paths.root);
       if (!validation.ok) {
@@ -368,6 +379,7 @@ export async function initializeWorkspace(
       schemaVersion: 1,
       id,
       name,
+      harnessProvider: provider,
       status: "draft",
       organization: { name: "Unknown", domains: [] },
       businessCapabilities: [],
@@ -410,6 +422,11 @@ export async function initializeWorkspace(
     }
     return { created: true, root: paths.root };
   });
+}
+
+export async function portfolioHarnessProvider(rootInput: string): Promise<HarnessProvider> {
+  const portfolio = await readYaml<PortfolioDocument>(workspacePaths(rootInput).portfolioFile);
+  return requireProvider(portfolio.harnessProvider ?? "claude");
 }
 
 export async function registerDocument(
@@ -781,7 +798,9 @@ export async function submitQuestionPacket(
   intentId: string,
   stage: string,
   sourceFile: string,
-): Promise<{ path: string; status: "waiting" }> {
+  kind?: "startup" | "permission",
+  expiresAt?: string,
+): Promise<{ path: string; status: "waiting" | "pending" }> {
   assertId(id, "question packet id");
   assertId(stage, "stage");
   const root = resolve(rootInput);
@@ -796,7 +815,16 @@ export async function submitQuestionPacket(
   return withLock(root, async () => {
     const loaded = await loadWorkspace(root);
     requireIntentProject(loaded, intentId, projectId);
-    requireSessionStatus(loaded, intentId, projectId, "active");
+    const session = loaded.state.sessions[sessionKey(intentId, projectId)];
+    if (kind === "startup") {
+      if (session?.status === "active" || session?.status === "waiting") {
+        throw new PortfolioError("pause the child before reviewing startup trust");
+      }
+    } else if (kind === "permission" && session?.status === "waiting") {
+      // Native subagents can request independent permissions concurrently.
+    } else {
+      requireSessionStatus(loaded, intentId, projectId, "active");
+    }
     const metadataPath = questionMetadataPath(root, id);
     if (await pathExists(metadataPath)) {
       throw new PortfolioError(`question packet already exists: ${id}`);
@@ -810,14 +838,16 @@ export async function submitQuestionPacket(
       intent: intentId,
       stage,
       status: "pending",
+      ...(kind ? { kind } : {}),
+      ...(expiresAt ? { expiresAt } : {}),
       questionRevision: contentRevision(parsed.skeleton),
       questionCount: parsed.answers.length,
       createdAt: now,
     };
     await atomicWrite(questionDocumentPath(root, id), content);
     await atomicWrite(metadataPath, `${JSON.stringify(packet, null, 2)}\n`);
-    await setSessionStatus(loaded, intentId, projectId, "waiting");
-    return { path: questionDocumentPath(root, id), status: "waiting" };
+    if (kind !== "startup") await setSessionStatus(loaded, intentId, projectId, "waiting");
+    return { path: questionDocumentPath(root, id), status: kind === "startup" ? "pending" : "waiting" };
   });
 }
 
@@ -827,7 +857,7 @@ export async function answerQuestionPacket(
   sourceFile: string,
   mode: QuestionAnswerMode,
   answeredBy: string,
-): Promise<{ path: string; status: "active" }> {
+): Promise<{ path: string; status: string }> {
   assertId(id, "question packet id");
   if (!["guided", "markdown", "chat"].includes(mode)) {
     throw new PortfolioError(`invalid question answer mode: ${mode}`);
@@ -844,6 +874,9 @@ export async function answerQuestionPacket(
     if (packet.status !== "pending") {
       throw new PortfolioError(`question packet ${id} is already ${packet.status}`);
     }
+    if (packet.expiresAt && Date.parse(packet.expiresAt) <= Date.now()) {
+      throw new PortfolioError(`question packet ${id} has expired; await a fresh request`);
+    }
     if (
       parsed.answers.length !== packet.questionCount ||
       contentRevision(parsed.skeleton) !== packet.questionRevision
@@ -858,7 +891,9 @@ export async function answerQuestionPacket(
 
     const loaded = await loadWorkspace(root);
     requireIntentProject(loaded, packet.intent, packet.project);
-    requireSessionStatus(loaded, packet.intent, packet.project, "waiting");
+    if (packet.kind !== "startup") {
+      requireSessionStatus(loaded, packet.intent, packet.project, "waiting");
+    }
     const now = new Date().toISOString();
     const answered: QuestionPacket = {
       ...packet,
@@ -872,9 +907,42 @@ export async function answerQuestionPacket(
       questionMetadataPath(root, id),
       `${JSON.stringify(answered, null, 2)}\n`,
     );
-    await setSessionStatus(loaded, packet.intent, packet.project, "active");
-    return { path: questionDocumentPath(root, id), status: "active" };
+    const pending = await listQuestionPackets(root, packet.project, packet.intent, "pending");
+    const status = packet.kind === "startup"
+      ? loaded.state.sessions[sessionKey(packet.intent, packet.project)]?.status ?? "pending"
+      : pending.some((item) => item.kind !== "startup") ? "waiting" : "active";
+    if (packet.kind !== "startup") await setSessionStatus(loaded, packet.intent, packet.project, status);
+    return { path: questionDocumentPath(root, id), status };
   });
+}
+
+export async function expireQuestionPacket(root: string, id: string): Promise<void> {
+  await withLock(root, async () => {
+    const packet = await readQuestionPacket(root, id);
+    if (!packet.kind || packet.status !== "pending") return;
+    await atomicWrite(questionMetadataPath(root, id), `${JSON.stringify({ ...packet, status: "expired" }, null, 2)}\n`);
+    const loaded = await loadWorkspace(root);
+    const pending = await listQuestionPackets(root, packet.project, packet.intent, "pending");
+    if (packet.kind !== "startup" && !pending.some((item) => item.kind !== "startup")) {
+      await setSessionStatus(loaded, packet.intent, packet.project, "active");
+    }
+  });
+}
+
+export async function readHumanDecision(root: string, id: string) {
+  const packet = await readQuestionPacket(root, id);
+  if (packet.status !== "answered" || !packet.answeredBy) {
+    throw new PortfolioError(`question packet ${id} requires a human answer`);
+  }
+  const parsed = parseQuestionDocument(await readFile(questionDocumentPath(root, id), "utf8"));
+  if (contentRevision(parsed.skeleton) !== packet.questionRevision || parsed.answers.length !== 1) {
+    throw new PortfolioError("approval question changed after review");
+  }
+  const decision = parsed.answers[0]!.trim().toLowerCase();
+  if (decision !== "approve" && decision !== "reject") {
+    throw new PortfolioError("approval answer must be exactly approve or reject");
+  }
+  return { decision, answeredBy: packet.answeredBy, answeredAt: packet.answeredAt };
 }
 
 export async function listQuestionPackets(
@@ -1113,7 +1181,8 @@ async function assertDispatchable(
   if (!(await pathExists(worktree))) {
     throw new PortfolioError(`worktree does not exist: ${worktree}`);
   }
-  const harness = await verifyHarness(root, "claude", projectId, intentId);
+  const harnessProvider = loaded.portfolio.harnessProvider ?? "claude";
+  const harness = await verifyHarness(root, harnessProvider, projectId, intentId);
   if (!harness.ok) {
     const details = [
       ...harness.errors,
@@ -1124,6 +1193,10 @@ async function assertDispatchable(
     throw new PortfolioError(
       `AI-DLC harness verification failed: ${details.join("; ")}`,
     );
+  }
+  if (harnessProvider === "codex") {
+    const { verifyCodexStartup } = await import("./codex.ts");
+    await verifyCodexStartup(root, projectId, intentId, true);
   }
   if (!(await hasAidlcHarness(worktree))) {
     throw new PortfolioError(`AI-DLC harness not found in worktree: ${worktree}`);
@@ -1151,6 +1224,7 @@ async function assertDispatchable(
   }
   return {
     worktree,
+    harnessProvider,
     branch: mapping.branch,
     aidlcIntent: mapping.aidlcIntent,
     aidlcSpace,
@@ -1769,6 +1843,7 @@ async function ensureDirectories(root: string): Promise<void> {
 
 async function hasAidlcHarness(worktree: string): Promise<boolean> {
   const candidates = [
+    ".agents/skills/aidlc/SKILL.md",
     ".claude/skills/aidlc/SKILL.md",
     ".kiro/skills/aidlc/SKILL.md",
     ".codex/skills/aidlc/SKILL.md",
@@ -1980,7 +2055,7 @@ async function transitionBlockers(
     if (!actor?.trim()) {
       blockers.push("record explicit plan acceptance with --accepted-by <human>");
     }
-    const harness = await verifyHarness(root, "claude");
+    const harness = await verifyHarness(root, loaded.portfolio.harnessProvider ?? "claude");
     if (!harness.ok) {
       blockers.push(
         ...harness.errors.map((error) => `harness: ${error}`),
@@ -2403,7 +2478,7 @@ async function restoreFile(file: string, content: string | null): Promise<void> 
   await atomicWrite(file, content);
 }
 
-async function atomicWrite(file: string, content: string): Promise<void> {
+export async function atomicWrite(file: string, content: string): Promise<void> {
   await mkdir(dirname(file), { recursive: true });
   const temporary = join(
     dirname(file),
@@ -2413,7 +2488,7 @@ async function atomicWrite(file: string, content: string): Promise<void> {
   await rename(temporary, file);
 }
 
-async function withLock<T>(root: string, operation: () => Promise<T>): Promise<T> {
+export async function withLock<T>(root: string, operation: () => Promise<T>): Promise<T> {
   const lock = join(workspacePaths(root).portfolio, ".portfolio.lock");
   const owner: PortfolioLockOwner = {
     token: crypto.randomUUID(),

@@ -1,0 +1,5 @@
+# Install next to your Codex config.toml as aidlc_portfolio.config.toml.
+# The model, provider, and authentication remain your configured defaults.
+sandbox_mode = "workspace-write"
+approval_policy = "on-request"
+approvals_reviewer = "auto_review"

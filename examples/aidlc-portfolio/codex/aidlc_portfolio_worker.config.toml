@@ -1,0 +1,4 @@
+# Install next to config.toml. Startup trust is reviewed in the supervisor chat.
+sandbox_mode = "workspace-write"
+approval_policy = "on-request"
+approvals_reviewer = "user"

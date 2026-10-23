@@ -103,6 +103,12 @@ When you launch with an agent profile (e.g., `--agents code_supervisor`), CAO:
 
 This enables Codex to operate with role-specific instructions (e.g., supervisor, developer, reviewer) just like other providers.
 
+For a multi-project workflow with isolated worktrees and persistent human
+question packets, see the
+[AI-DLC portfolio Codex setup](../examples/aidlc-portfolio/README.md#codex-setup).
+Its runner explicitly reads the AI-DLC onboarding because CAO's role prompt
+replaces the project's `developer_instructions` value.
+
 ### MCP Server Integration
 
 If the agent profile includes `mcpServers`, CAO injects each MCP server into Codex via `-c mcp_servers.<name>.<field>=<value>` config overrides. This is per-session and does not modify the user's global `~/.codex/config.toml`.
@@ -193,8 +199,9 @@ Verified on codex-cli 0.162.1. Each profile gets its own file; the keys go at th
 - **Read-only / audit agents**: `approval_policy = "never"` + `sandbox_mode = "read-only"` — write/network/escape attempts fail closed and return errors to the model.
 - **Write-permitted agents**: `approval_policy = "never"` + `sandbox_mode = "workspace-write"` — writes inside the workspace proceed; sandbox escapes fail closed.
 - **Smart Approvals (classifier-gated)**: `approval_policy = "on-request"` + `sandbox_mode = "workspace-write"` + `approvals_reviewer = "auto_review"` — the auto-review classifier decides escalations; denials fail closed without prompting.
+- **Supervisor decision queue**: the [AI-DLC portfolio example](../examples/aidlc-portfolio/README.md#codex-setup) uses a reviewed `PermissionRequest` hook to return native allow/deny decisions from its supervisor conversation before a worker prompt appears.
 
-Avoid `approval_policy = "untrusted"` or `approval_policy = "on-request"` without `approvals_reviewer = "auto_review"` — those tiers prompt the user, which CAO cannot answer.
+Use `approval_policy = "untrusted"` or human-reviewed `"on-request"` only with a trusted approval handler such as that example. Without a handler, those tiers prompt in the worker terminal, which CAO cannot answer.
 
 Example — a reviewer that runs under Codex's read-only sandbox:
 

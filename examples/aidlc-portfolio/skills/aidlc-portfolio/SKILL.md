@@ -5,6 +5,11 @@ description: Coordinate multiple AI-DLC workflows across repositories and Git wo
 
 # AI-DLC Portfolio
 
+For Codex profiles or a portfolio with `harnessProvider: codex`, read
+[Codex operation](references/codex.md) before bootstrap or dispatch. It selects
+the Codex distribution, runner, onboarding, and hook-trust procedure. Existing
+portfolios without a provider field retain the Claude default.
+
 Maintain a thin control plane around existing AI-DLC workflows. Never replace
 or modify the child workflow engine.
 
@@ -52,10 +57,10 @@ items. Perform setup on their behalf:
    portfolio intent per independent work item using templates and utility
    commands.
 6. Create each worktree through `worktree create`.
-7. Locate the Claude AI-DLC distribution at
-   `$HOME/Project/aidlc-workflows/dist/claude`. Run `harness stage`, `harness
-   sync`, and `harness verify` to project one manifest-pinned Opus 5 runtime
-   into every worktree.
+7. Locate the distribution for the portfolio's harness provider. Claude uses
+   `$HOME/Project/aidlc-workflows/dist/claude`; Codex follows the reference above.
+   Run `harness stage`, `harness sync`, and `harness verify` to project one
+   manifest-pinned runtime into every worktree.
 8. Run `doctor` and `dispatch check`, then assign all dependency-ready
    `aidlc_runner` sessions concurrently with CAO `working_directory` set to
    each absolute worktree.
@@ -151,12 +156,13 @@ bun "$SKILL_DIR/scripts/portfolio.ts" harness verify --root <root>
 ```
 
 The staged manifest records source revision, source and staged hashes, overlay
-revision, and staging time. The default overlay pins the Claude `opus[1m]`
-alias to `global.anthropic.claude-opus-5[1m]`. Use `--project` and `--intent`
-to sync or verify a subset.
+revision, and staging time. Harness commands default to `harnessProvider` in
+`portfolio.yaml`. The Claude overlay pins `opus[1m]` to
+`global.anthropic.claude-opus-5[1m]`; Codex retains its configured model without
+an Opus overlay. Use `--project` and `--intent` to sync or verify a subset.
 
-Never bypass a tracked-path refusal. Reconcile project-owned `.claude/` or
-`aidlc/` content explicitly before retrying.
+Never bypass a tracked-path refusal. Reconcile project-owned runtime or skill
+directories and `aidlc/` content explicitly before retrying.
 
 ## Dispatch
 
