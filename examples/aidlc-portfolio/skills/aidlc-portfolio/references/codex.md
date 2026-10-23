@@ -76,16 +76,21 @@ The utility persists the packet, answer, project, intent, and waiting status;
 CAO messages carry the continuation signal. On recovery, inspect those records
 before creating a replacement terminal for the same worktree and child intent.
 
-Keep local relay packets and result files in the worktree's excluded
-`.aidlc-portfolio/` directory. If the native engine assigns a dated intent
+Keep local relay packets and result files in `aidlc/portfolio-relay/` in the
+worktree. The native engine excludes the `aidlc/` workspace shell from its
+source fingerprint; Git ignores alone do not exclude arbitrary directories
+from that fingerprint. Keep `.aidlc-portfolio/` for harness receipts.
+If the native engine assigns a dated intent
 directory at initialization, update that project's `aidlcIntent` mapping
 through `intent create` with the complete existing intent document and the
 reported native identity. Preserve other project mappings and session records.
 
-For large engine directives, redirect stdout to an excluded file and parse the
-complete JSON there. Piping a large steering payload through the terminal can
-produce Bun `EAGAIN` writes or truncated output. Failed or incomplete output
-requires native recovery before a continuation receipt can be consumed.
+Run native engine commands on their own. For large directives, select the
+shell tool's PTY mode (`tty: true`) and an output budget large enough to read
+the complete JSON. Piped output can produce Bun `EAGAIN` writes; redirection
+can conflict with native command guards or change the source being checked.
+Failed or incomplete output requires native recovery before a continuation
+receipt can be consumed.
 
 This gives one conversational decision queue while the supervisor is running.
 The example does not install a browser decision inbox or an external

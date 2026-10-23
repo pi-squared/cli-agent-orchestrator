@@ -55,19 +55,21 @@ advisory that hooks have not run establishes missing execution evidence; check
 or request the operator's actual trust confirmation before claiming they are
 untrusted.
 
-Write local relay packets and result submissions under `.aidlc-portfolio/`,
-which runtime synchronization excludes from Git. The utility stores their
-durable portfolio copies. Keep these transport files out of the product's
-source diff and the engine's source fingerprint. If initialization creates a
+Write local relay packets and result submissions under
+`aidlc/portfolio-relay/`. Both Git runtime exclusions and the native engine's
+source boundary exclude that workspace shell. The utility stores durable
+portfolio copies; `.aidlc-portfolio/` remains the harness receipt directory.
+If initialization creates a
 dated native intent directory, report its exact identity to the supervisor so
 it can update the existing mapping through `intent create`, preserving the
 registered worktree and session.
 
-Capture large engine JSON directives into files under `.aidlc-portfolio/`
-with shell output redirection, then parse and read the complete directive from
-that file. This avoids pipe backpressure and truncated steering output in the
-terminal transport. If output is incomplete or the command fails, recover
-through the engine before consuming its continuation receipt.
+Run native engine commands on their own, as the engine specifies. For large
+JSON directives, use the shell tool's PTY mode (`tty: true`) with enough output
+budget to read the complete response. This avoids Bun pipe backpressure while
+retaining native command guards and source fingerprints. If output is
+incomplete or the command fails, recover through the engine before consuming
+its continuation receipt.
 
 Treat project/team memory in the worktree as temporary. Submit durable findings
 with `learning propose` against the assigned baseline; leave canonical writes,
