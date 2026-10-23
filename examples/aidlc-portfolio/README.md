@@ -355,6 +355,15 @@ The suite does not invoke a provider or perform real project development. It
 tests the deterministic portfolio control plane with temporary Git
 repositories and worktrees. CAO's main CI workflow runs the same command.
 
+For a live Codex smoke test, use two disposable repositories and the Codex
+setup above. Give each child a small change with an undecided wording choice.
+Verify that both submit unanswered packets and leave implementation paused.
+Answer one packet and verify that only its child resumes. Replace that child's
+terminal and verify recovery uses the same worktree, native intent, and stored
+answers. Continue through the native engine's human gates, require a verified
+`result submit` receipt, and inspect `convergence check`. This exercise requires
+authenticated Codex sessions and is separate from the deterministic CI suite.
+
 ## Boundaries
 
 This example does not:
