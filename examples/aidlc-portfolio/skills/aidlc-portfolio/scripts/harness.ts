@@ -13,6 +13,7 @@ import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { parse } from "yaml";
 
 export type HarnessProvider = "claude" | "codex";
+export const CODEX_PERMISSION_RELAY_COMMAND = 'bun "${CAO_HOME_DIR:-$HOME/.aws/cli-agent-orchestrator}/skills/aidlc-portfolio/scripts/codex-permission.ts" || printf \'%s\\n\' \'{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"Portfolio approval relay unavailable; report the blocker to the supervisor."}}}\'';
 
 interface HarnessManifest {
   schemaVersion: 1;
@@ -24,6 +25,7 @@ interface HarnessManifest {
   };
   overlay: {
     opusModel?: string;
+    portfolioPermissionRelay?: number;
     revision: string;
   };
   staged: {
@@ -88,7 +90,7 @@ export async function stageHarness(
   }
   const overlay = provider === "claude"
     ? { opusModel: opusModel ?? DEFAULT_OPUS_MODEL }
-    : {};
+    : { portfolioPermissionRelay: 1 };
   const root = resolve(rootInput);
   const source = resolve(sourceInput);
   const target = harnessRoot(root, provider);
@@ -141,6 +143,19 @@ export async function stageHarness(
     }
     if (overlay.opusModel !== undefined) {
       await applyClaudeOverlay(temporary, overlay.opusModel);
+    }
+    if (provider === "codex") {
+      const path = join(temporary, ".codex/hooks.json");
+      const hooks = JSON.parse(await readFile(path, "utf8"));
+      hooks.hooks ??= {};
+      hooks.hooks.PermissionRequest ??= [];
+      hooks.hooks.PermissionRequest.push({ matcher: ".*", hooks: [{
+        type: "command",
+        command: CODEX_PERMISSION_RELAY_COMMAND,
+        timeout: 3600,
+        statusMessage: "Waiting for approval through the portfolio supervisor",
+      }] });
+      await writeFile(path, `${JSON.stringify(hooks, null, 2)}\n`);
     }
     const manifest: HarnessManifest = {
       schemaVersion: 1,
@@ -289,7 +304,7 @@ export async function verifyHarness(
   };
 }
 
-async function canonicalRepositories(root: string, worktrees: RegisteredWorktree[]): Promise<string[]> {
+export async function canonicalRepositories(root: string, worktrees: RegisteredWorktree[]): Promise<string[]> {
   const repositories = new Set<string>();
   for (const { path } of worktrees) {
     const common = resolve(path, (await gitOutput(path, ["rev-parse", "--git-common-dir"])).trim());
@@ -445,7 +460,7 @@ async function requireCleanStagedHarness(
   return manifest;
 }
 
-async function registeredWorktrees(
+export async function registeredWorktrees(
   root: string,
   projectFilter?: string,
   intentFilter?: string,

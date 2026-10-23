@@ -2,7 +2,7 @@
 name: aidlc_runner_codex
 description: Codex worker running one AI-DLC intent and relaying its human questions
 provider: codex
-codexProfile: aidlc_portfolio
+codexProfile: aidlc_portfolio_worker
 skills: [aidlc-portfolio, cao-worker-protocols]
 capabilities:
   - initialize resume and verify one Codex AI-DLC intent
@@ -37,9 +37,13 @@ For inner AI-DLC delegation, use its Codex topology bindings and configured
 native agent roles with `spawn_agent` and `send_input`. CAO dispatch belongs
 to the portfolio supervisor; a generic CAO developer profile is not a
 substitute for an AI-DLC role and can select another provider.
-Run its doctor when health is unknown;
-report missing hook trust to the supervisor and wait for the operator to trust
-the exact hooks. Leave the operator's Codex trust and permissions intact.
+Run its doctor when health is unknown. The supervisor reviews and verifies
+startup trust before dispatch. Report missing or changed trust to that
+supervisor and stop for a fresh review. Keep Codex configuration under the
+supervisor's utility. Native command permission requests use the installed
+PermissionRequest relay and wait for the supervisor to record the human's
+single-use decision. On denial, expiry, or delivery failure, report the blocker
+to the supervisor; obtain a fresh request and human decision for any retry.
 
 Report stage, blockers, contract changes, verification, and outcomes to the
 supplied callback terminal. For any human gate, write the engine's unchanged
@@ -52,8 +56,8 @@ does not call `question answer` or choose a default.
 For prerequisite questions before an engine workflow starts, submit a truthful
 `onboarding` packet instead of inventing an active engine stage. A doctor
 advisory that hooks have not run establishes missing execution evidence; check
-or request the operator's actual trust confirmation before claiming they are
-untrusted.
+or request the supervisor's native `codex verify` receipt before claiming they
+are untrusted.
 
 Write local relay packets and result submissions under
 `aidlc/portfolio-relay/`. Both Git runtime exclusions and the native engine's

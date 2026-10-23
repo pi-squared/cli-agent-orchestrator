@@ -15,7 +15,8 @@ Codex owns `.codex/`, `.agents/`, and `aidlc/`.
 
 The Claude overlay maps `opus[1m]` to
 `global.anthropic.claude-opus-5[1m]`. Codex keeps the operator's model settings
-and rejects the Claude-only `--opus-model` option. Staging leaves the source
+and rejects the Claude-only `--opus-model` option. Its versioned overlay adds
+the supervisor permission relay to `.codex/hooks.json`. Staging leaves the source
 distribution unchanged. Repeating it with identical source bytes and overlay
 is a no-op.
 

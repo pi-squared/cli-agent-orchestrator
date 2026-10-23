@@ -1,0 +1,45 @@
+// Protocol fixture: opaque native hashes and optimistic config writes.
+import { createInterface } from 'node:readline';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { join, dirname, resolve } from 'node:path';
+import { createHash } from 'node:crypto';
+const home=process.env.CODEX_HOME!;
+const configPath=join(home,'config.toml');
+const profile=join(home,'aidlc_portfolio_worker.config.toml');
+const hash=(value:any)=>'sha256:'+createHash('sha256').update(value).digest('hex');
+const text=()=>readFileSync(configPath,'utf8');
+const config=()=>Bun.TOML.parse(text()) as any;
+const version=()=>hash(text());
+function flatten(value:any,path:string[]=[]):string[] {
+  return Object.entries(value).flatMap(([key,child])=>child&&typeof child==='object'&&!Array.isArray(child)?flatten(child,[...path,key]):[[...path,key].map(JSON.stringify).join('.')+' = '+JSON.stringify(child)]);
+}
+function hooks(cwd:string) {
+  const common=Bun.spawnSync(['git','-C',cwd,'rev-parse','--git-common-dir']);
+  const canonical=dirname(resolve(cwd,Buffer.from(common.stdout).toString().trim()));
+  const source=join(canonical,'.codex/hooks.json');
+  const definitions=JSON.parse(readFileSync(source,'utf8')).hooks;
+  const values:any[]=[];
+  for(const [event,groups] of Object.entries(definitions) as any) {
+    for(const [g,group] of groups.entries()) for(const [i,handler] of group.hooks.entries()) {
+      values.push({key:source+':'+event+':'+g+':'+i,eventName:event[0].toLowerCase()+event.slice(1),handlerType:'command',command:handler.command,sourcePath:source,source:'project',matcher:group.matcher??null,timeoutSec:handler.timeout??600,enabled:true,isManaged:false,currentHash:hash(JSON.stringify({event,group,handler}))});
+    }
+  }
+  const c=config();
+  return values.map(h=>({...h,trustStatus:c.hooks?.state?.[h.key]?.trusted_hash===h.currentHash?'trusted':'untrusted'}));
+}
+createInterface({input:process.stdin}).on('line',line=>{
+ const r=JSON.parse(line); if(!r.id)return;
+ try {
+  let result:any;
+  if(r.method==='initialize')result={codexHome:home,userAgent:'test-codex/0.164'};
+  else if(r.method==='config/read') result={config:{...config(),sandbox_mode:'workspace-write',approval_policy:'on-request',approvals_reviewer:'user'},layers:[{name:{type:'user',file:profile,profile:'aidlc_portfolio_worker'},version:hash(readFileSync(profile))},{name:{type:'user',file:configPath,profile:null},version:version()}]};
+  else if(r.method==='hooks/list') result={data:r.params.cwds.map((cwd:string)=>({cwd,hooks:hooks(cwd),errors:[],warnings:[]}))};
+  else if(r.method==='config/batchWrite') {
+   if(r.params.expectedVersion!==version())throw Error('version mismatch');
+   const c=config();
+   for(const e of r.params.edits){const parts=e.keyPath.match(/"(?:\\.|[^"\\])*"|[^.]+/g).map((x:string)=>x.startsWith('"')?JSON.parse(x):x);let v=c;for(const k of parts.slice(0,-1))v=v[k]??={};v[parts.at(-1)]=e.value;}
+   writeFileSync(configPath,'# preserved comment\n'+flatten(c).join('\n')+'\n');result={status:'ok'};
+  }else throw Error('unknown method '+r.method);
+  console.log(JSON.stringify({id:r.id,result}));
+ }catch(e:any){console.log(JSON.stringify({id:r.id,error:{message:e.message}}));}
+});
